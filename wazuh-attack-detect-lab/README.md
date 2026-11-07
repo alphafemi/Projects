@@ -9,7 +9,7 @@ A VirtualBox lab where a Kali Linux attacker runs common attack techniques again
 | 1 | SSH brute force | Ubuntu | 5710, 5503, 2502, 5712 | 5 to 10 | T1110 | Yes |
 | 2 | RDP brute force | Windows 11 | 60122 | 5 | T1110, T1021.001 | Yes |
 | 3 | Nmap SYN scan | Ubuntu | 100200, 100201 (custom) | 5 to 10 | T1046 | Yes (Ubuntu only) |
-| 4 | Executable dropped in `Users\Public` | Windows 11 | 92207 | 12 | see `rule.mitre.id` in alert | Yes |
+| 4 | Executable dropped in `Users\Public` | Windows 11 | 92207 | 12 | 92207 | Yes |
 | 5 | Sysmon network connection (Event ID 3) | Windows 11 | 100110 (custom) | 3 | n/a (detection capability test) | Partial |
 
 ## Lab architecture
