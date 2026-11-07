@@ -1,7 +1,93 @@
 # Attack-and-Detect Home Lab with Wazuh
 
-A VirtualBox lab where a Kali Linux attacker runs common attack techniques against Windows 11 and Ubuntu targets, and a Wazuh SIEM detects them. Each test records the command run, the Wazuh rule that fired, and the MITRE ATT&CK technique it maps to.
+A virtual lab where I attack two victim machines from Kali Linux and detect those attacks in a Wazuh SIEM. I wrote custom decoders and rules for detections that Wazuh does not provide out of the box.
 
+**Skills shown:** SIEM deployment, agent configuration, log analysis, custom decoder and rule writing, Sysmon tuning, MITRE ATT&CK mapping, troubleshooting.
+
+---
+## Setup Summary
+
+1. Imported the Wazuh OVA into VirtualBox and confirmed the dashboard at `https://192.168.0.xxx`.
+2. Built the Ubuntu VM, installed the Wazuh agent, enabled `ufw` with logging.
+3. Built the Windows 11 VM ( GB disk, EFI, manual install), installed the Wazuh agent and Sysmon.
+4. Built Kali and confirmed it could reach both victims.
+5. Confirmed both agents showed **Active** in the dashboard before testing.
+- **Hypervisor:** VirtualBox, all VMs on bridged networking so they share one LAN.
+---
+
+
+## Lab architecture
+
+| VM | Hostname / Agent name | IP | Role | OS |
+| --- | --- | --- | --- | --- |
+| Attacker | `kaliz` | 192.168.0.xxx | Generates attack traffic | Kali Linux |
+| Victim (Linux) | `ub11` / `ubuntu-victim` | 192.168.0.xxx | Monitored endpoint | Ubuntu 26.10 |
+| Victim (Windows) | `wn11` / `win11-victimNET` | 192.168.0.xxx | Monitored endpoint | Windows 11 Enterprise (evaluation) |
+| SIEM | `wazuh-server` | 192.168.0.xxx | Collects, decodes, alerts | Wazuh v4.14.9 OVA |
+
+All VMs run on a VirtualBox **Bridged Adapter** on the same `192.168.0.0/24` network.
+
+## Custom Detection Content
+
+Wazuh has no default rule for UFW firewall blocks, and its default rule for Sysmon network connections (Event ID 3) does not store an alert. Those events were received but never shown, so I wrote the following.
+
+### Agent config (Ubuntu): `/var/ossec/etc/ossec.conf`
+
+```xml
+<localfile>
+  <log_format>syslog</log_format>
+  <location>/var/log/ufw.log</location>
+</localfile>
+```
+
+### Decoder (Wazuh server): `/var/ossec/etc/decoders/local_decoder.xml`
+
+```xml
+<decoder name="ufw-block">
+  <parent>kernel</parent>
+  <prematch type="pcre2">\[UFW BLOCK\]</prematch>
+  <regex type="pcre2">SRC=(\S+) DST=(\S+).*PROTO=(\S+) SPT=(\d+) DPT=(\d+)</regex>
+  <order>srcip, dstip, protocol, srcport, dstport</order>
+</decoder>
+```
+
+### Rules (Wazuh server): `/var/ossec/etc/rules/local_rules.xml`
+
+```xml
+<group name="sysmon,">
+  <rule id="100100" level="3">
+    <if_sid>61603</if_sid>
+    <description>Sysmon process created: $(win.eventdata.image)</description>
+  </rule>
+
+  <rule id="100110" level="3">
+    <if_group>sysmon_event3</if_group>
+    <description>Sysmon network connection: $(win.eventdata.image) to $(win.eventdata.destinationIp):$(win.eventdata.destinationPort)</description>
+  </rule>
+</group>
+
+<group name="firewall,ufw,">
+  <rule id="100200" level="5">
+    <decoded_as>kernel</decoded_as>
+    <match>UFW BLOCK</match>
+    <description>UFW firewall blocked a connection attempt</description>
+    <group>firewall_drop,</group>
+  </rule>
+
+  <rule id="100201" level="10" frequency="8" timeframe="60">
+    <if_matched_sid>100200</if_matched_sid>
+    <same_source_ip />
+    <description>Multiple UFW blocks from the same source - possible port scan</description>
+    <group>recon,</group>
+  </rule>
+</group>
+```
+
+Rule 100201 correlates 8 or more blocked connections from the same source within 60 seconds into one higher-severity alert.
+
+I checked the decoder and rules with `wazuh-logtest` before restarting the manager. A passing run showed rule `100200` at level 5 with "Alert to be generated".
+
+---
 ## Results at a glance
 
 | # | Test | Target | Wazuh rule(s) | Level | MITRE ATT&CK | Detected |
@@ -11,49 +97,7 @@ A VirtualBox lab where a Kali Linux attacker runs common attack techniques again
 | 3 | Nmap SYN scan | Ubuntu | 100200, 100201 (custom) | 5 to 10 | T1046 | Yes (Ubuntu only) |
 | 4 | Executable dropped in `Users\Public` | Windows 11 | 92207 | 12 | 92207 | Yes |
 | 5 | Sysmon network connection (Event ID 3) | Windows 11 | 100110 (custom) | 3 | n/a (detection capability test) | Partial |
-
-## Lab architecture
-
-| VM | Role | Notes |
-|----|------|-------|
-| `kaliz` | Attacker | Kali Linux, Nmap, `sshpass`, `xfreerdp3` |
-| `win11-victimNET` | Windows target | Windows 11 Enterprise Evaluation, Sysmon, Wazuh agent |
-| `ubuntu-victim` | Linux target | Ubuntu 26.10, UFW with logging, Wazuh agent |
-| `wazuh-server` | SIEM | Wazuh 4.14.9 (manager, indexer, dashboard) |
-
-All VMs run on a VirtualBox **Bridged Adapter** on the same `192.168.0.0/24` network.
-
-## Custom detection rules
-
-Custom rules live in `/var/ossec/etc/rules/local_rules.xml` on the Wazuh server.
-
-| Rule ID | Level | Purpose |
-|---------|-------|---------|
-| 100100 | 3 | Sysmon process creation (Event ID 1) |
-| 100110 | 3 | Sysmon network connection (Event ID 3) |
-| 100200 | 5 | UFW firewall blocked a connection attempt |
-| 100201 | 10 | Multiple UFW blocks from the same source (possible port scan) |
-
-Rule 100110 as deployed:
-
-```xml
-<rule id="100110" level="3">
-  <if_group>sysmon_event3</if_group>
-  <description>sysmon network connection: $(win.eventdata.image) to $(win.eventdata.destinationIp):$(win.eventdata.destinationPort)</description>
-</rule>
-```
-
-> Paste the XML for 100100, 100200 and 100201 from your `local_rules.xml` here.
-
-The UFW rules depend on this block in the Ubuntu agent's `ossec.conf`:
-
-```xml
-<localfile>
-  <log_format>syslog</log_format>
-  <location>/var/log/ufw.log</location>
-</localfile>
-```
-
+---
 ## Test 1: SSH brute force (Ubuntu)
 
 **Action** (from Kali): repeated failed logins with a non-existent user.
@@ -137,13 +181,9 @@ curl.exe -I https://example.com
 - **Kali needs `-Pn` against Windows.** Windows blocks ping by default, so Nmap can decide the host is down and skip the scan.
 - **VM clock drift.** The VMs and the Wazuh server had different time settings, so timestamps differ across screenshots. Check `date` on every VM and the timezone before capturing evidence.
 
-## Next steps
-
-- Fix Windows scan visibility (firewall logging, or Sysmon network rules for inbound connections).
-- Find out why PowerShell Event ID 3 events are not alerting.
-- Add active response to block a source IP after the brute-force rules fire.
-- Sync VM clocks with NTP and add a MITRE ATT&CK mapping table for every custom rule.
 
 ## Tools
 
 VirtualBox, Kali Linux, Nmap, `sshpass`, FreeRDP (`xfreerdp3`), Sysmon, Wazuh 4.14.9, UFW.
+---
+*Built as a hands-on project after completing TryHackMe SOC Level 1.*
